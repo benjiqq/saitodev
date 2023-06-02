@@ -1,309 +1,157 @@
-use std::io::prelude::*;
-use std::path::Path;
+//https://chat.openai.com/share/46d1ad91-41d7-41a2-8212-2205e6f64939
+#![allow(warnings)]
+mod analyse;
 
-use saito_core::core::data::block::{Block, BlockType};
-use saito_core::core::data::transaction::{Transaction, TransactionType, TRANSACTION_SIZE};
-use std::io::{Error, ErrorKind};
-use saito_core::core::data::hop::HOP_SIZE;
-use saito_core::core::data::slip::{Slip, SlipType, SLIP_SIZE};
 
-pub const BLOCK_HEADER_SIZE: usize = 245;
+/////////////
+use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream, tungstenite::protocol::Message};
+use tokio::net::TcpStream;
+use tokio::time::{sleep, Duration};
+use saito_rust::saito::rust_io_handler::RustIOHandler;
 
-//use saito_core::common::defs::SaitoHash;
-//use saito_core::common::defs::Timestamp;
-use hex::FromHex;
-use std::fs;
-use std::io::{self, Read};
 
-use log::{debug, error, info, trace, warn};
+use futures::{StreamExt, SinkExt}; // for the 'next' and 'send' functions
+
+//use std::time::Duration;
+use std::thread;
 
 use saito_core::common::defs::{
     Currency, SaitoHash, SaitoPrivateKey, SaitoPublicKey, SaitoSignature, SaitoUTXOSetKey,
     Timestamp, UtxoSet, GENESIS_PERIOD, MAX_STAKER_RECURSION,
 };
 
+use saito_core::core::data::crypto::generate_keys;
+use std::sync::Arc;
+use saito_core::core::data::wallet::Wallet;
+use tokio::sync::RwLock;
+use saito_rust::saito::io_event::IoEvent;
+use saito_core::{lock_for_read, lock_for_write};
+use saito_core::common::defs::{
+    push_lock, LOCK_ORDER_BLOCKCHAIN,
+    LOCK_ORDER_CONFIGS, LOCK_ORDER_PEERS, LOCK_ORDER_WALLET,
+};
 
+#[tokio::main(flavor = "multi_thread")]
+async fn main() {
 
-fn main() {
-    println!("...analyse tx...");
-    //analyseTx()
-    let path = "1685355604168-51c5ef4f5d5ad7052d7e09e8821f5fb5fd628c9defffc70dccf2a58616563957.sai";
-    analyseblock(path.to_string());
+    //create wallet
+    let public_key: SaitoPublicKey =
+        hex::decode("03145c7e7644ab277482ba8801a515b8f1b62bcd7e4834a33258f438cd7e223849")
+            .unwrap()
+            .try_into()
+            .unwrap();
+    let private_key: SaitoPrivateKey =
+        hex::decode("ddb4ba7e5d70c2234f035853902c6bc805cae9163085f2eac5e585e2d6113ccd")
+            .unwrap()
+            .try_into()
+            .unwrap();
 
-    // match analyseblock() {
-    //     Ok(_) => println!("Successfully analysed the block."),
-    //     Err(e) => eprintln!("An error occurred: {}", e),
-    // }
-
-    match readDir() {
-        Ok(_) => println!("ok"),
-        Err(e) => eprintln!("error {}", e)
+    let keys = generate_keys();
+    println!("{:?}", keys);
+    let wallet = Arc::new(RwLock::new(Wallet::new(keys.1, keys.0)));
+    let  channel_size = 1000;
+    {
+        let mut wallet = wallet.write().await;
+        let (sender, _receiver) = tokio::sync::mpsc::channel::<IoEvent>(channel_size);
+        Wallet::load(&mut wallet, Box::new(RustIOHandler::new(sender, 1))).await;
     }
+
+    let output_slips_per_input_slip: u8 = 100;
+    let unspent_slip_count;
+    let available_balance;
+
+    {
+        let (wallet, _wallet_) = lock_for_read!(wallet, LOCK_ORDER_WALLET);
+
+        unspent_slip_count = wallet.get_unspent_slip_count();
+        available_balance = wallet.get_available_balance();
+        println!("available_balance: {}", available_balance);
+    }
+
+    // let mut transaction =
+    //     Transaction::create(&mut wallet, public_key, payment, fee, false)
+    //         .unwrap();
+    // transaction.generate_total_fees(0, 0);
+
+    //create slips
+    //sign
+
+    // sender
+    // .send(IoEvent {
+    //     event_processor_id: 0,
+    //     event_id: 0,
+    //     event: NetworkEvent::OutgoingNetworkMessageForAll {
+    //         buffer: Message::Transaction(tx).serialize(),
+    //         exceptions: vec![],
+    //     },
+    // })
+    // .await
+    // .unwrap();
+
+    //create a transaction
+
+    //analyse from disk doesnt work
+    //println!("runAnalyse.....");
+    //analyse::runAnalyse();
 }
 
-fn readDir() -> std::io::Result<()> {
-    // Specify the directory
-    let directory_path = "/Users/ben/projects/saito/blocks";
+//#[tokio::main]
+async fn runConnect() -> Result<(), Box<dyn std::error::Error>> {
 
-    for entry in fs::read_dir(directory_path)? {
-        let entry = entry?;
-        let path = entry.path();
+    //get blockheight
+    
+    let url = "ws://127.0.0.1:12101/wsopen"; // replace with your websocket server url
+    println!("Connect to {:?}", url);
 
-        if path.is_file() {
-            // let mut file = fs::File::open(&path)?;
+    // connect to the server
+    let (ws_stream, response) = connect_async(url).await.expect("Failed to connect");
+    println!("Connected to the server");
+    println!("Response HTTP code: {}", response.status());
+    println!("Response contains the following headers:");
+    for (ref h, _v) in response.headers() {
+        println!(">> {}", h);
+    }
 
-            // let mut buffer = Vec::new();
-            // file.read_to_end(&mut buffer)?;            
+    // WebSocketStream splits into a sink and a stream
+    let (mut write, mut read) = ws_stream.split();
 
-            // Convert PathBuf to String
-            match path.into_os_string().into_string() {
-                Ok(path_string) => {
-                    
-                    analyseblock(path_string);
-                }
-                Err(_) => println!("Path contains non-unicode characters"),
-            }
+    // Read messages from the server
+    // while let Some(message) = read.next().await {
+    //     let message = message?;
+    //     println!("Received a message: {}", message.to_text()?);
+    // }
 
-            //analyseblock(path.to_string());
+    // Read messages from the server
 
-            // match String::from_utf8(buffer) {
-            //     Ok(contents) => println!("Contents:\n{}", contents),
-            //     Err(e) => println!("Non-UTF8 file detected: {}", e),
-            // }
+    //handle_handshake_challenge
+
+    while let Some(Ok(message)) = read.next().await {
+        println!("wait for next message");
+        
+        match message {
+            Message::Text(text) => {
+                println!("Received a text message: {}", text);
+            },
+            Message::Binary(bin) => {
+                println!("Received a binary message: {:?}", bin);
+
+                let response = "....nothing";
+                let mut response_bytes = response.as_bytes().to_vec(); // convert the string to bytes
+                //7 will indicate ping message
+                response_bytes[0] = 7;
+                println!("{:?}" , response_bytes);
+                write.send(Message::Binary(response_bytes)).await.unwrap();
+
+                println!("Sleeping for 1 second...");
+                sleep(Duration::from_secs(1)).await;
+                println!("Done sleeping!");    
+            
+                //write.send(Message::Text(response.into())).await?;
+            },
+            _ => {},
         }
     }
 
     Ok(())
 }
 
-fn analyseTx() {
-    let mut tx = Transaction::default();
-
-    let mut input_slip = Slip::default();
-    input_slip.public_key = <SaitoPublicKey>::from_hex(
-        "dcf6cceb74717f98c3f7239459bb36fdcd8f350eedbfccfbebf7c0b0161fcd8bcc",
-    )
-    .unwrap();
-    input_slip.amount = 0;
-    input_slip.block_id = 0;
-    input_slip.tx_ordinal = 0;
-    input_slip.amount = 123;
-
-    let mut output_slip = Slip::default();
-    output_slip.public_key = <SaitoPublicKey>::from_hex(
-            "dcf6cceb74717f98c3f7239459bb36fdcd8f350eedbfccfbebf7c0b0161fcd8bcc",
-    )
-    .unwrap();    
-    output_slip.block_id = 0;
-    output_slip.tx_ordinal = 0;
-
-    //tx.add_from_slip(input1);
-    //tx.add_to_slip(output1);
-    tx.from.push(input_slip);
-    tx.to.push(output_slip);
-}
-
-fn analyseblock(path: String) -> io::Result<()> {
-
-    
-    
-    //TODO 
-    //instantiate a block
-    //write a block to disk
-    //read a block to disk
-    println!("\n.... analyse a block.....");
-    println!("File: {}", path);
-
-    
-    let bytes = fs::read(path)?;
-
-    let transactions_len: u32 = u32::from_be_bytes(bytes[0..4].try_into().unwrap());
-    let id: u64 = u64::from_be_bytes(bytes[4..12].try_into().unwrap());
-    let timestamp: Timestamp = Timestamp::from_be_bytes(bytes[12..20].try_into().unwrap());
-    pub type Timestamp = u64;
-    println!("transactions_len: {}", transactions_len);
-    println!("id: {}", id);
-    //println!("{}", data[12..16]);
-    // for byte in &data[12..20] {
-    //     println!("{}", byte);
-    // }
-    println!("timestamp: {}", timestamp);
-
-    let previous_block_hash: SaitoHash = bytes[20..52].try_into().unwrap();
-    let creator: SaitoPublicKey = bytes[52..85].try_into().unwrap();
-    let merkle_root: SaitoHash = bytes[85..117].try_into().unwrap();
-    let signature: SaitoSignature = bytes[117..181].try_into().unwrap();
-
-    let treasury: Currency = Currency::from_be_bytes(bytes[181..189].try_into().unwrap());
-    let staking_treasury: Currency =
-        Currency::from_be_bytes(bytes[189..197].try_into().unwrap());
-
-    let burnfee: Currency = Currency::from_be_bytes(bytes[197..205].try_into().unwrap());
-    let difficulty: u64 = u64::from_be_bytes(bytes[205..213].try_into().unwrap());
-
-    let avg_income: Currency = Currency::from_be_bytes(bytes[213..221].try_into().unwrap());
-    let avg_variance: Currency = Currency::from_be_bytes(bytes[221..229].try_into().unwrap());
-    let avg_atr_income: Currency = Currency::from_be_bytes(bytes[229..237].try_into().unwrap());
-    let avg_atr_variance: Currency =
-        Currency::from_be_bytes(bytes[237..245].try_into().unwrap());
-
-    // let mut s = String::new();
-    // for byte in &previous_block_hash {
-    //     s.push_str(&format!("{:02x}", byte));
-    // }
-    // println!("{}", s);
-    println!("transactions_len: {}", transactions_len);
-
-    let mut start_of_transaction_data = BLOCK_HEADER_SIZE;
-
-    //let mut transactions = vec![];
-    let inputs_len: u32 = u32::from_be_bytes(
-        bytes[start_of_transaction_data..start_of_transaction_data + 4]
-            .try_into()
-            .unwrap(),
-    );
-
-    let outputs_len: u32 = u32::from_be_bytes(
-        bytes[start_of_transaction_data + 4..start_of_transaction_data + 8]
-            .try_into()
-            .unwrap(),
-    );
-
-    let message_len: usize = u32::from_be_bytes(
-        bytes[start_of_transaction_data + 8..start_of_transaction_data + 12]
-            .try_into()
-            .unwrap(),
-    ) as usize;
-    let path_len: usize = u32::from_be_bytes(
-        bytes[start_of_transaction_data + 12..start_of_transaction_data + 16]
-            .try_into()
-            .unwrap(),
-    ) as usize;
-
-    println!("inputs_len: {}", inputs_len);
-    println!("outputs_len: {}", outputs_len);
-    
-    let mut start_of_transaction_data = BLOCK_HEADER_SIZE;
-    println!("start_of_transaction_data: {}", start_of_transaction_data);
-
-    let end_of_transaction_data = start_of_transaction_data
-        + TRANSACTION_SIZE
-        + ((inputs_len + outputs_len) as usize * SLIP_SIZE)
-        + message_len
-        + path_len as usize * HOP_SIZE;
-
-    println!("end_of_transaction_data: {}", end_of_transaction_data);
-    
-    //TODO serialize/deserialize tx
-
-    // let transaction = Transaction::deserialize_from_net(
-    //     &bytes[start_of_transaction_data..end_of_transaction_data].to_vec(),
-    // )?;
-
-    Ok(())
-
-}
-
-// let mut block = Block::new();
-    // block.id = 10;
-    // block.timestamp = 1637034582;
-    // let hex_string = "bcf6cceb74717f98c3f7239459bb36fdcd8f350eedbfccfbebf7c0b0161fcd8b";
-
-    // let hash = <SaitoHash>::from_hex(hex_string);
-
-    // // block.previous_block_hash = <SaitoHash>::from_hex(
-    // //     "bcf6cceb74717f98c3f7239459bb36fdcd8f350eedbfccfbebf7c0b0161fcd8b",
-    // // )
-    // // .unwrap();
-    // // block.merkle_root = <SaitoHash>::from_hex(
-    // //     "ccf6cceb74717f98c3f7239459bb36fdcd8f350eedbfccfbebf7c0b0161fcd8b",
-    // // )
-    // // .unwrap();
-    // // block.creator = <SaitoPublicKey>::from_hex(
-    // //     "dcf6cceb74717f98c3f7239459bb36fdcd8f350eedbfccfbebf7c0b0161fcd8bcc",
-    // // )
-    // // .unwrap();
-    // //block.signature = <[u8; 64]>::from_hex("c9a6c2d0bf884be6933878577171a3c8094c2bf6e0bc1b4ec3535a4a55224d186d4d891e254736cae6c0d2002c8dfc0ddfc7fcdbe4bc583f96fa5b273b9d63f4").unwrap();
-    // block.burnfee = 50000000;
-    // block.difficulty = 0;
-    // block.treasury = 0;
-    // block.staking_treasury = 0;
-    
-
-    // println!("id: {}", block.id);
-    // println!("timestamp: {}", block.timestamp);
-    // println!("hash {:?}", hash);
-    
-    // let serialized_body = block.serialize_for_signature();
-    //println!("{:?}", serialized_body);    
-
-    //println!("{}", std::str::from_utf8(&hash).unwrap());
-    
-   
-    //block.deserialize_from_net(&data);
-
-    //let block2 = Block::deserialize_from_net(data)?;
-    //println!("id: {}", block2.id);
-
-
-//transactions.push(transaction);
-
-    // 
-    // for _n in 0..transactions_len {
-    //     if bytes.len() < start_of_transaction_data + 16 {
-    //         warn!(
-    //             "block buffer is invalid to read transaction metadata. length : {:?}",
-    //             bytes.len()
-    //         );
-    //         return Err(Error::from(ErrorKind::InvalidData));
-    //     }
-    //     let inputs_len: u32 = u32::from_be_bytes(
-    //         bytes[start_of_transaction_data..start_of_transaction_data + 4]
-    //             .try_into()
-    //             .unwrap(),
-    //     );
-    //     let outputs_len: u32 = u32::from_be_bytes(
-    //         bytes[start_of_transaction_data + 4..start_of_transaction_data + 8]
-    //             .try_into()
-    //             .unwrap(),
-    //     );
-    //     let message_len: usize = u32::from_be_bytes(
-    //         bytes[start_of_transaction_data + 8..start_of_transaction_data + 12]
-    //             .try_into()
-    //             .unwrap(),
-    //     ) as usize;
-    //     let path_len: usize = u32::from_be_bytes(
-    //         bytes[start_of_transaction_data + 12..start_of_transaction_data + 16]
-    //             .try_into()
-    //             .unwrap(),
-    //     ) as usize;
-    //     let end_of_transaction_data = start_of_transaction_data
-    //         + TRANSACTION_SIZE
-    //         + ((inputs_len + outputs_len) as usize * SLIP_SIZE)
-    //         + message_len
-    //         + path_len as usize * HOP_SIZE;
-
-    //     if bytes.len() < end_of_transaction_data {
-    //         warn!(
-    //             "block buffer is invalid to read transaction data. length : {:?}",
-    //             bytes.len()
-    //         );
-    //         return Err(Error::from(ErrorKind::InvalidData));
-    //     }
-    //     let transaction = Transaction::deserialize_from_net(
-    //         &bytes[start_of_transaction_data..end_of_transaction_data].to_vec(),
-    //     )?;
-    //     transactions.push(transaction);
-    //     start_of_transaction_data = end_of_transaction_data;
-    // }
-
-    //println!("previous_block_hash: {}", previous_block_hash);
-    // println!("creator: {}", creator);
-    // println!("merkle_root: {}", merkle_root);
-    // println!("signature: {}", signature);
-
-    // if let Ok(s) = std::str::from_utf8(&bytes) {
-    //     println!("{}", previous_block_hash);
-    // } else {
-    //     println!("Data is not valid UTF-8");
-    // }

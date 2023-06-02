@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 saito-core = { path = "../saito-rust-workspace/saito-core" }
+saito-rust = { path = "../saito-rust-workspace/saito-rust" }
 tokio = { version = "1.24.2", features = ["full", "tracing"] }
 tungstenite = { version = "0.18.0" }
 tokio-tungstenite = { version = "0.18.0", features = ["native-tls"] }
